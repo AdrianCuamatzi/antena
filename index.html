@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12263A">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Radar wifi</title>
+<style>
+:root{--paper:#E8EEF1;--ink:#12263A;--line:#9DB1C0;--soft:#D3DDE3;--accent:#0F8B8D;box-sizing:border-box}
+*,*:before,*:after{box-sizing:inherit}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 "Avenir Next","Segoe UI",system-ui,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{padding:16px 16px 0;max-width:680px;margin:auto}
+h1{margin:0;font-size:1.5rem;font-weight:700;letter-spacing:-.01em}
+header p{margin:4px 0 0;color:#4A6073;max-width:60ch}
+main{max-width:680px;margin:auto;padding:12px 16px 32px}
+canvas{width:100%;aspect-ratio:1;display:block;touch-action:manipulation}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+button,select,input,textarea{font:inherit;color:var(--ink)}
+button{background:var(--ink);color:var(--paper);border:0;border-radius:6px;padding:9px 14px;cursor:pointer}
+button.alt{background:transparent;color:var(--ink);border:1.5px solid var(--ink)}
+button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible,.item:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+input,select,textarea{background:#F6F9FA;border:1.5px solid var(--line);border-radius:6px;padding:8px 10px}
+input[type=url]{flex:1;min-width:200px}
+textarea{width:100%;min-height:90px;font-family:ui-monospace,Menlo,monospace;font-size:.85rem}
+label{display:flex;align-items:center;gap:6px;font-size:.9rem}
+details{margin:12px 0;border-top:1.5px solid var(--line);padding-top:10px}
+summary{cursor:pointer;font-weight:600}
+#info{min-height:3.2em;padding:10px 12px;background:var(--soft);border-radius:6px}
+#list{display:grid;gap:6px;margin-top:12px}
+.item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;background:#F6F9FA;border:1.5px solid transparent;cursor:pointer;text-align:left;color:var(--ink);width:100%}
+.item[aria-pressed=true]{border-color:var(--ink)}
+.dot{width:12px;height:12px;flex:none;border-radius:50%}
+.dot.b5{border-radius:2px;transform:rotate(45deg)}
+.item small{margin-left:auto;color:#4A6073;white-space:nowrap}
+#msg{color:#9B2335;min-height:1.4em;margin:0}
+.hint{font-size:.85rem;color:#4A6073}
+</style>
+</head>
+<body>
+<header>
+  <h1>Radar wifi</h1>
+  <p>Cada red aparece más cerca del centro cuanto más fuerte llega su señal. La intensidad indica distancia, no dirección.</p>
+</header>
+<main>
+  <canvas id="radar" role="img" aria-label="Mapa radial de redes wifi"></canvas>
+  <div id="info" aria-live="polite">Carga datos para ver las redes.</div>
+
+  <div class="row">
+    <button id="demo">Ver demostración</button>
+    <label>Ángulo
+      <select id="mode"><option value="hash">Disperso por red</option><option value="band">Por banda (2.4 izq · 5 der)</option></select>
+    </label>
+  </div>
+
+  <details open>
+    <summary>Datos en vivo</summary>
+    <div class="row">
+      <input id="url" type="url" placeholder="http://localhost:8080" value="http://localhost:8080" aria-label="Dirección de datos">
+      <button id="live">Conectar</button>
+      <button id="stop" class="alt">Detener</button>
+    </div>
+    <p class="hint">Lee un JSON con redes cada 3 s. Con Termux puedes servirlo con <code>termux-server.py</code>.</p>
+  </details>
+
+  <details>
+    <summary>Importar escaneo</summary>
+    <textarea id="paste" placeholder='JSON ([{"ssid":"Casa","bssid":"aa:bb","rssi":-52,"frequency_mhz":2437}]) o CSV (ssid,rssi,canal)'></textarea>
+    <div class="row"><button id="load">Dibujar</button><input id="file" type="file" accept=".json,.csv,.txt" aria-label="Archivo de escaneo"></div>
+  </details>
+
+  <details>
+    <summary>Calibración de distancia</summary>
+    <div class="row">
+      <label>Potencia a 1 m (dBm) <input id="tx" type="number" value="-40" style="width:80px"></label>
+      <label>Exponente <input id="nexp" type="number" value="3" min="2" max="4" step="0.1" style="width:70px"></label>
+    </div>
+    <p class="hint">La distancia en metros es una estimación: paredes y muebles la alteran mucho.</p>
+  </details>
+
+  <p id="msg" role="alert"></p>
+  <div id="list"></div>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), cv=$('#radar'), ctx=cv.getContext('2d');
+const calm=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let nets=new Map(), sel=null, timer=null, sweep=0, W=0;
+const P={tx:-40,n:3};
+
+const hash=s=>{let h=2166136261;for(const c of s){h^=c.charCodeAt(0);h=Math.imul(h,16777619)}return (h>>>0)/4294967296};
+const chan=f=>!f?null:f>=2412&&f<=2484?(f===2484?14:(f-2407)/5):f>=5000?(f-5000)/5:null;
+const dist=r=>Math.pow(10,(P.tx-r)/(10*P.n));
+const rad=r=>Math.min(1,Math.max(.05,(-30-r)/60));
+const color=r=>`hsl(${170+rad(r)*180} 70% 38%)`;
+function ang(n){const h=hash(n.id);
+  if($('#mode').value==='band')return (n.band===5?-Math.PI/2:Math.PI/2)+h*Math.PI;
+  return h*2*Math.PI}
+
+function norm(o){
+  const rssi=+(o.rssi??o.level??o.signal??o.dbm); if(!isFinite(rssi))return null;
+  const f=+(o.frequency_mhz??o.frequency??o.freq)||null;
+  const ch=+(o.channel??o.canal)||chan(f);
+  const band=f?(f>3000?5:2.4):(ch>14?5:2.4);
+  const ssid=o.ssid||'(oculta)';
+  return {ssid,id:o.bssid||o.mac||ssid,rssi,ch,band};
+}
+function parse(t){
+  t=t.trim();
+  try{let j=JSON.parse(t); if(!Array.isArray(j))j=j.networks||j.results||[j]; return j.map(norm).filter(Boolean)}catch{}
+  const L=t.split(/\r?\n/).filter(Boolean), sep=L[0].includes(';')?';':',';
+  const H=L[0].split(sep).map(s=>s.trim().toLowerCase()), hasH=H.some(h=>/ssid|rssi|level|signal/.test(h));
+  return L.slice(hasH?1:0).map(l=>{const c=l.split(sep).map(s=>s.trim());
+    if(hasH){const o={};H.forEach((h,i)=>o[h]=c[i]);return norm(o)}
+    return norm({ssid:c[0],rssi:c[1],channel:c[2]})}).filter(Boolean);
+}
+function update(list,smooth){
+  const next=new Map();
+  for(const n of list){const o=nets.get(n.id); if(smooth&&o)n.rssi=o.rssi*.6+n.rssi*.4; next.set(n.id,n)}
+  nets=next; if(sel&&!nets.has(sel))sel=null; render();
+}
+
+function fit(){const d=devicePixelRatio||1; W=cv.clientWidth; cv.width=cv.height=W*d; ctx.setTransform(d,0,0,d,0,0)}
+function pos(n){const R=W/2-28, r=rad(n.rssi)*R, a=ang(n); return {x:W/2+Math.cos(a)*r, y:W/2+Math.sin(a)*r}}
+function draw(){
+  if(!W)return; const c=W/2, R=W/2-28; ctx.clearRect(0,0,W,W);
+  ctx.font='12px "Segoe UI",system-ui,sans-serif'; ctx.textAlign='left'; ctx.textBaseline='middle';
+  for(const d of [-40,-55,-70,-85]){const r=(-30-d)/60*R;
+    ctx.strokeStyle='#9DB1C0';ctx.lineWidth=1;ctx.beginPath();ctx.arc(c,c,r,0,7);ctx.stroke();
+    ctx.fillStyle='#4A6073';ctx.fillText(`${d} dBm · ~${dist(d).toFixed(0)} m`,c+4,c-r+9)}
+  ctx.strokeStyle='#C2D0DA';ctx.beginPath();ctx.moveTo(c,c-R);ctx.lineTo(c,c+R);ctx.moveTo(c-R,c);ctx.lineTo(c+R,c);ctx.stroke();
+  if(!calm){sweep+=.012;const g=ctx.createConicGradient?ctx.createConicGradient(sweep-1,c,c):null;
+    if(g){g.addColorStop(0,'rgba(15,139,141,0)');g.addColorStop(.16,'rgba(15,139,141,.22)');g.addColorStop(.1601,'rgba(15,139,141,0)');
+      ctx.fillStyle=g;ctx.beginPath();ctx.arc(c,c,R,0,7);ctx.fill()}}
+  ctx.fillStyle='#12263A';ctx.beginPath();ctx.arc(c,c,5,0,7);ctx.fill();
+  for(const n of nets.values()){const p=pos(n), on=n.id===sel;
+    ctx.fillStyle=color(n.rssi);ctx.beginPath();
+    if(n.band===5){ctx.save();ctx.translate(p.x,p.y);ctx.rotate(Math.PI/4);ctx.rect(-6,-6,12,12);ctx.restore()}else ctx.arc(p.x,p.y,7,0,7);
+    ctx.fill(); if(on){ctx.strokeStyle='#12263A';ctx.lineWidth=2.5;ctx.stroke()}
+    ctx.fillStyle='#12263A';ctx.textAlign=p.x>c?'left':'right';
+    ctx.fillText(n.ssid.slice(0,16),p.x+(p.x>c?11:-11),p.y);ctx.textAlign='left'}
+}
+function loop(){draw(); if(!calm)requestAnimationFrame(loop)}
+
+function render(){
+  const arr=[...nets.values()].sort((a,b)=>b.rssi-a.rssi), L=$('#list'); L.textContent='';
+  for(const n of arr){
+    const b=document.createElement('button'); b.className='item'; b.setAttribute('aria-pressed',n.id===sel);
+    const d=document.createElement('span'); d.className='dot'+(n.band===5?' b5':''); d.style.background=color(n.rssi);
+    const t=document.createElement('span'); t.textContent=n.ssid;
+    const s=document.createElement('small'); s.textContent=`${Math.round(n.rssi)} dBm · ~${dist(n.rssi).toFixed(1)} m`;
+    b.append(d,t,s); b.onclick=()=>pick(n.id); L.append(b)}
+  const n=nets.get(sel);
+  $('#info').textContent=n?`${n.ssid} — ${Math.round(n.rssi)} dBm, a unos ${dist(n.rssi).toFixed(1)} m, banda ${n.band} GHz${n.ch?`, canal ${Math.round(n.ch)}`:''}.`
+    :arr.length?`${arr.length} redes. Toca una para ver el detalle.`:'Carga datos para ver las redes.';
+  if(calm)draw();
+}
+function pick(id){sel=sel===id?null:id;render()}
+cv.addEventListener('click',e=>{const r=cv.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+  let best=null,bd=22; for(const n of nets.values()){const p=pos(n),d=Math.hypot(p.x-x,p.y-y); if(d<bd){bd=d;best=n.id}}
+  if(best)pick(best)});
+
+const msg=t=>$('#msg').textContent=t||'';
+function stop(){clearInterval(timer);timer=null}
+async function poll(){try{const r=await fetch($('#url').value,{cache:'no-store'}); if(!r.ok)throw 0;
+  const l=parse(await r.text()); if(!l.length)throw 0; update(l,true); msg()}
+  catch{msg('No se pudo leer datos de esa dirección. Revisa que el servidor esté activo y permita CORS.')}}
+$('#live').onclick=()=>{stop();poll();timer=setInterval(poll,3000)};
+$('#stop').onclick=()=>{stop();msg()};
+$('#load').onclick=()=>{stop();const l=parse($('#paste').value); l.length?(update(l),msg()):msg('No encontré redes en ese texto. Revisa el formato.')};
+$('#file').onchange=async e=>{const f=e.target.files[0]; if(f){$('#paste').value=await f.text();$('#load').click()}};
+$('#mode').onchange=render;
+for(const [k,id] of [['tx','#tx'],['n','#nexp']])$(id).oninput=e=>{P[k]=+e.target.value||P[k];render()};
+
+const names=['Casa','Oficina','Vecino 2.4','Vecino 5G','Café','Repetidor','Invitados','Impresora','Hotspot','Depto 4B'];
+$('#demo').onclick=()=>{stop();const base=names.map((s,i)=>({ssid:s,id:'demo'+i,rssi:-38-i*6.2,band:i%3===1?5:2.4,ch:i%3===1?36:6}));
+  const tick=()=>update(base.map(n=>({...n,rssi:n.rssi+(Math.random()*6-3)})),true); tick(); timer=setInterval(tick,1500)};
+
+addEventListener('resize',()=>{fit();draw()});
+fit(); loop(); render();
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>

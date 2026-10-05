@@ -1,0 +1,14 @@
+{
+  "name": "Radar wifi",
+  "short_name": "Radar wifi",
+  "description": "Mapa radial de redes wifi según la intensidad de su señal",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#E8EEF1",
+  "theme_color": "#12263A",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
